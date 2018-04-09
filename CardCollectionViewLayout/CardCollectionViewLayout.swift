@@ -10,69 +10,56 @@ import UIKit
 
 let UICollectionElementKindCardInfo = "UICollectionElementKindCardInfo"
 
+
+
 class CardCollectionViewLayout: UICollectionViewLayout {
-    let cardHeight: CGFloat = 100
-    let verticalSpacing: CGFloat = 10
-    let horizontalSpacing: CGFloat = 10
+    private let itemsLayout: LayoutProtocol =
+        PerspectiveLayout(viewType: .cell,
+                          verticalLayout: ScaledVerticalLayout(),
+                          horizontalLayout: PerspectiveHorizontalLayout())
 
-    /// - Perspective point to which the cards will convergate to.
-    /// - Should be out of the screen.
-    var perspectivePoint: CGPoint = .zero
-    /// Y coordinate from where the cards begin to convergate to persepctive point
-    var perspectiveEdge: CGFloat = 0
-    var availableCellXRange: ClosedRange<CGFloat> = 0...0
-    var availableInfoXrange: ClosedRange<CGFloat> = 0...0
-
-    private var leftTangens: CGFloat = 1
-    private var rightTangens: CGFloat = 1
-
-    private var itemsLayoutAttributes: [UICollectionViewLayoutAttributes] = []
-    private var supplementaryLayoutAttributes: [UICollectionViewLayoutAttributes] = []
 
     override var collectionViewContentSize: CGSize {
-        guard let lastFrame = itemsLayoutAttributes.last?.frame else {
+        guard let collectionView = collectionView else {
+            return .zero
+        }
+        let itemsCount = collectionView.numberOfItems(inSection: 0)
+        guard itemsCount > 0 else {
             return .zero
         }
 
-        let leftInset = collectionView?.contentInset.left ?? 0
-        return CGSize(width: lastFrame.maxX - leftInset,
-                      height: lastFrame.maxY)
+        let lastIndexPath = IndexPath(item: itemsCount - 1, section: 0)
+        let maxY = itemsLayout.layoutAttributes(at: lastIndexPath, for: collectionView).frame.maxY
+
+        return CGSize(width: collectionView.bounds.width
+            - collectionView.contentInset.left
+            - collectionView.contentInset.right,
+                      height: maxY - collectionView.contentInset.top)
     }
 
     override func prepare() {
         super.prepare()
         if let collectionView = collectionView {
-            // TODO: Remove perspective point update from here
-            perspectivePoint = CGPoint(x: collectionView.bounds.width * (2 / 3), y: -200)
-            perspectiveEdge = collectionView.bounds.height / 4
-            collectionView.contentInset.top = perspectiveEdge
-            // Available x space
-            let lowerBound = collectionView.bounds.width / 3
-            let upperBound = collectionView.bounds.width - collectionView.contentInset.right
-            availableCellXRange = lowerBound...upperBound
-            availableInfoXrange = collectionView.contentInset.left...(lowerBound - horizontalSpacing)
-            // Calculations of angles
-            leftTangens = (perspectivePoint.x - lowerBound) / (perspectiveEdge - perspectivePoint.y)
-            rightTangens = (upperBound - perspectivePoint.x) / (perspectiveEdge - perspectivePoint.y)
+            itemsLayout.prepare(with: collectionView)
         }
-
-        itemsLayoutAttributes = generateItemsLayoutAttributes()
-        supplementaryLayoutAttributes = generateSupplementaryLayoutAttributes(from: itemsLayoutAttributes)
     }
 
     override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
-        return itemsLayoutAttributes.filter { $0.frame.intersects(rect) }
-            + supplementaryLayoutAttributes.filter { $0.frame.intersects(rect) }
+        return itemsLayout.layoutAttributesForElements(in: rect)
     }
 
     override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
-        return itemsLayoutAttributes[indexPath.row]
+        guard let collectionView = collectionView else {
+            return nil
+        }
+
+        return itemsLayout.layoutAttributes(at: indexPath, for: collectionView)
     }
 
     override func layoutAttributesForSupplementaryView(ofKind elementKind: String,
                                                        at indexPath: IndexPath
         ) -> UICollectionViewLayoutAttributes? {
-        return supplementaryLayoutAttributes[indexPath.row]
+        return nil
     }
 
     override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
@@ -82,95 +69,183 @@ class CardCollectionViewLayout: UICollectionViewLayout {
 
 // MARK: - Gathering the layout
 
-extension CardCollectionViewLayout {
-    func generateItemsLayoutAttributes() -> [UICollectionViewLayoutAttributes] {
-        guard let collectionView = collectionView else {
-            return []
-        }
+protocol LayoutProtocol {
+    func prepare(with collectionView: UICollectionView)
+
+    func layoutAttributes(at indexPath: IndexPath,
+                          for collectionView: UICollectionView) -> UICollectionViewLayoutAttributes
+
+    func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]
+}
+
+enum CardLayoutViewType {
+    case cell
+    case supplementary(kind: String)
+    case decorataion(kind: String)
+}
+
+class PerspectiveLayout: LayoutProtocol {
+    private var layoutAttributes: [UICollectionViewLayoutAttributes]
+
+    private let viewType: CardLayoutViewType
+    private let verticalLayout: ScaledVerticalLayout
+    private let horizontalLayout: PerspectiveHorizontalLayout
+    
+
+    init(viewType: CardLayoutViewType,
+         verticalLayout: ScaledVerticalLayout,
+         horizontalLayout: PerspectiveHorizontalLayout) {
+            layoutAttributes = []
+            self.viewType = viewType
+            self.verticalLayout = verticalLayout
+            self.horizontalLayout = horizontalLayout
+    }
+
+    func prepare(with collectionView: UICollectionView) {
+        verticalLayout.prepare(with: collectionView)
+        horizontalLayout.prepare(with: collectionView)
+
         let count = collectionView.numberOfItems(inSection: 0)
-        let offset = collectionView.contentOffset.y
-        let splitEdge = offset + perspectiveEdge
-
-        let splitIndex = (0..<count)
-            .filter { generateNormalMinY(at: $0) < splitEdge }
-            .last ?? 0
-
-        let aboveSplitRange = 0..<splitIndex
-        let belowSplitRange = splitIndex..<count
-
-        let aboveSplit: [UICollectionViewLayoutAttributes] = aboveSplitRange.map { index in
-            return generateLayoutAttributes(at: index,
-                                            for: offset,
-                                            scaled: 0.05)
-        }
-
-        let belowSplit: [UICollectionViewLayoutAttributes] = belowSplitRange.map { index in
-            return generateLayoutAttributes(at: index,
-                                            for: offset,
-                                            scaled: 1.0)
-        }
-
-        return aboveSplit + belowSplit
-    }
-
-    func generateSupplementaryLayoutAttributes(from itemAttributes: [UICollectionViewLayoutAttributes]
-        ) -> [UICollectionViewLayoutAttributes] {
-        let contentOffset = collectionView?.contentOffset.y ?? 0.0
-        return itemAttributes.map { itemAttributes in
-            let attributes = UICollectionViewLayoutAttributes(
-                forSupplementaryViewOfKind: UICollectionElementKindCardInfo,
-                with: itemAttributes.indexPath)
-
-            let width: CGFloat = availableInfoXrange.upperBound - availableInfoXrange.lowerBound
-            let minX = itemAttributes.frame.minX - 10 - width
-            let top = itemAttributes.frame.minY
-            attributes.frame = CGRect(x: minX,
-                                      y: top,
-                                      width: width,
-                                      height: itemAttributes.frame.height)
-
-            attributes.alpha = (0...1).clampValue((top - contentOffset - perspectiveEdge / 2)
-                / max(1, perspectiveEdge))
-            return attributes
+        layoutAttributes = (0..<count)
+            .map { index in
+                let indexPath = IndexPath(item: index, section: 0)
+                let (minY, height) = verticalLayout.verticalAttributes(at: indexPath,
+                                                                            for: collectionView)
+                let (minX, width) = horizontalLayout.horizontalAttributes(at: indexPath,
+                                                                          at: minY,
+                                                                          for: collectionView)
+                var viewAtttributes: UICollectionViewLayoutAttributes!
+                switch viewType {
+                case .cell:
+                    viewAtttributes = UICollectionViewLayoutAttributes(forCellWith: indexPath)
+                case .supplementary(let kind):
+                    viewAtttributes = UICollectionViewLayoutAttributes(forSupplementaryViewOfKind: kind,
+                                                                       with: indexPath)
+                case .decorataion(let kind):
+                    viewAtttributes = UICollectionViewLayoutAttributes(forDecorationViewOfKind: kind,
+                                                                       with: indexPath)
+                }
+                viewAtttributes.frame = CGRect(x: minX, y: minY, width: width, height: height)
+                return viewAtttributes
         }
     }
 
-    func generateStackedMinY(at index: Int,
-                             `for` splitEdge: CGFloat,
-                             scaled scaleFactor: CGFloat) -> CGFloat {
-        let splitEdge = splitEdge - cardHeight
-        let minY = generateNormalMinY(at: index)
-        return splitEdge - (splitEdge - minY) * scaleFactor
+    func layoutAttributes(at indexPath: IndexPath,
+                          for collectionView: UICollectionView) -> UICollectionViewLayoutAttributes {
+        return layoutAttributes[indexPath.row]
     }
 
-    func generateNormalMinY(at index: Int) -> CGFloat {
-        let floatIdx = CGFloat(index)
-        return (floatIdx + 1.0) * verticalSpacing + floatIdx * cardHeight
+    func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes] {
+        return layoutAttributes.filter { $0.frame.intersects(rect) }
+    }
+}
+
+class ScaledVerticalLayout {
+    let elementHeight: CGFloat
+    /// Vertical spacing between elements
+    let spacing: CGFloat
+
+    /// Defines from where the scaling should start (relative to collectionView's height)
+    let scalingEdge: CGFloat
+    /// Defines the scaling factor for vertical position
+    let scalingFactor: CGFloat
+
+    /// Taken from insets of collectionView
+    var contentInsetTop: CGFloat = 0
+
+    init(elementHeight: CGFloat = 100,
+         spacing: CGFloat = 10,
+         scalingEdge: CGFloat = 0.3,
+         scalingFactor: CGFloat = 0.05) {
+            assert(elementHeight >= 0)
+            assert(scalingFactor > 0)
+
+            self.elementHeight = elementHeight
+            self.spacing = spacing
+            self.scalingEdge = scalingEdge
+            self.scalingFactor = scalingFactor
     }
 
-    func generateLayoutAttributes(at index: Int,
-                                  `for` contentOffset: CGFloat,
-                                  scaled scaleFactor: CGFloat = 1.0
-        ) -> UICollectionViewLayoutAttributes {
-        let indexPath = IndexPath(item: index, section: 0)
-        let attributes = UICollectionViewLayoutAttributes(forCellWith: indexPath)
-        let top = generateStackedMinY(at: index,
-                                      for: contentOffset + perspectiveEdge,
-                                      scaled: scaleFactor)
-        // Calculating width
-        let verticalOrdinate = top - contentOffset - perspectivePoint.y
+    func prepare(with collectionView: UICollectionView) {
+        contentInsetTop = collectionView.contentInset.top
+    }
+
+    func verticalAttributes(at indexPath: IndexPath,
+                            for collectionView: UICollectionView) -> (positionY: CGFloat, height: CGFloat){
+        let itemIndex = CGFloat(indexPath.item)
+        let minY = contentInsetTop + itemIndex * (spacing + elementHeight)
+
+        let currentScalingEdge = collectionView.contentOffset.y + scalingEdge
+        var scaledMinY = minY
+
+        if minY < currentScalingEdge {
+            scaledMinY = currentScalingEdge - (currentScalingEdge - minY) * scalingFactor
+        }
+
+        return (scaledMinY, elementHeight)
+    }
+}
+
+class PerspectiveHorizontalLayout {
+    enum Perspective {
+        /// - both bounds have to be between 0 and 1
+        /// - point.x has to be between 0 ans 1
+        /// - point.y is absolute
+        case relative(point: CGPoint, boundsX: ClosedRange<CGFloat>)
+        case absolute(point: CGPoint, boundsX: ClosedRange<CGFloat>)
+    }
+
+    private var perspective: Perspective = .relative(point: .zero, boundsX: 0...1)
+    private var leftTangens: CGFloat = 0
+    private var rightTangens: CGFloat = 0
+
+    var perspectivePoint: CGPoint = .zero
+    /// Used do determine normal horizontal attributes of layouted views
+    var boundsX: ClosedRange<CGFloat> = 0...0
+    /// Taken from insets of collectionView
+    var insetXBounds: ClosedRange<CGFloat> = 0...0
+    // TODO: Might be relative as well
+    var perspectiveEdge: CGFloat = 0
+
+    init(perspective: Perspective = .relative(point: CGPoint(x: 0.5, y: -200), boundsX: 0...1)) {
+        if case let .relative(_, bounds) = perspective {
+            let allowedRange: ClosedRange<CGFloat> = 0...1
+            assert(allowedRange.contains(bounds.lowerBound))
+            assert(allowedRange.contains(bounds.upperBound))
+        }
+        self.perspective = perspective
+    }
+
+    func prepare(with collectionView: UICollectionView) {
+        let left = collectionView.contentInset.left
+        let right = collectionView.contentInset.right
+        let availableSpace = collectionView.bounds.width - left - right
+
+        insetXBounds = left...(left + availableSpace)
+
+        switch perspective {
+        case .relative(let point, let boundsX):
+            self.perspectivePoint = CGPoint(x: left + availableSpace * point.x, y: point.y)
+            self.boundsX = (left + boundsX.lowerBound * availableSpace)...(left + boundsX.upperBound * availableSpace)
+        case .absolute(let point, let boundsX):
+            self.perspectivePoint = point
+            self.boundsX = max(left, boundsX.lowerBound)...min(left + availableSpace, boundsX.upperBound)
+        }
+
+        leftTangens = (perspectivePoint.x - boundsX.lowerBound) / (perspectiveEdge - perspectivePoint.y)
+        rightTangens = (boundsX.upperBound - perspectivePoint.x) / (perspectiveEdge - perspectivePoint.y)
+    }
+
+    func horizontalAttributes(at indexPath: IndexPath,
+                              at verticalPosition: CGFloat,
+                              for collectionView: UICollectionView) -> (positionX: CGFloat, width: CGFloat) {
+        let verticalOrdinate = verticalPosition - collectionView.contentOffset.y - perspectivePoint.y
         let leftWidth = leftTangens * verticalOrdinate
         let rightWidth = rightTangens * verticalOrdinate
-        let frameX = availableCellXRange.clampValue(perspectivePoint.x - leftWidth)
-        // Alpha in dependency on stack position
-        attributes.alpha = (0...1).clampValue((top - contentOffset) / max(1, perspectiveEdge / 3))
-        // z index and frame
-        attributes.zIndex = index
-        attributes.frame = CGRect(x: frameX,
-                                  y: top,
-                                  width: availableCellXRange.lengthRange
-                                    .clampValue(leftWidth + rightWidth),
-                                  height: cardHeight)
-        return attributes
+
+        let minXposition = insetXBounds.clampValue(perspectivePoint.x - leftWidth)
+        let maxXPosition = insetXBounds.clampValue(perspectivePoint.x + rightWidth)
+
+        return (minXposition, maxXPosition - minXposition)
     }
 }
